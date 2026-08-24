@@ -20,6 +20,7 @@ sys.path.insert(
 )
 
 import mojo_lib3mf as m3  # noqa: E402
+from mojo_lib3mf._lib import addr, lib  # noqa: E402
 
 
 def best(function, repeat: int = 4) -> float:
@@ -123,6 +124,37 @@ def run() -> list[tuple[str, float, float, str]]:
             best(lambda: mesh.transformed(matrix)),
             best(lambda: numpy_transform(vertices, matrix)),
             "NumPy port of fnMATRIX3_apply",
+        )
+    )
+
+    large_vertices = np.ascontiguousarray(
+        rng.normal(size=(4_000_000, 3)), np.float32
+    )
+    large_result = np.empty_like(large_vertices)
+    kernels = lib()
+    kernels.m3mf_transform_vertices_f32(
+        addr(large_vertices), addr(matrix), addr(large_result), len(large_vertices)
+    )
+    rows.append(
+        (
+            "transform kernel 4M vertices",
+            best(
+                lambda: kernels.m3mf_transform_vertices_f32(
+                    addr(large_vertices),
+                    addr(matrix),
+                    addr(large_result),
+                    len(large_vertices),
+                )
+            ),
+            best(
+                lambda: kernels.m3mf_transform_vertices_f32_serial(
+                    addr(large_vertices),
+                    addr(matrix),
+                    addr(large_result),
+                    len(large_vertices),
+                )
+            ),
+            "serial Mojo kernel",
         )
     )
 

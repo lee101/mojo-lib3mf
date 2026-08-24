@@ -121,6 +121,12 @@ order, the `1e-10` normal cutoff, `1e-7` planar and identity choices, and the
 `CModelMeshObject::isManifoldAndOriented`: every undirected edge must occur once
 in each direction.
 
+Vertex transforms use the compiler-vectorized serial loop below 4 million
+vertices. At and above that measured crossover they split into eight independent,
+balanced CPU tasks; smaller inputs avoid thread-pool launch overhead. Explicit
+strided SIMD gathers were benchmarked but not retained because they were slower
+than Mojo's vectorization of the contiguous AoS loop on this machine.
+
 ## Correctness
 
 The tests install the official `lib3mf` 2.5.0 Python binding. Packages are
@@ -142,16 +148,19 @@ Measured with `pixi run bench` on an Intel Xeon E5-2697 v4 at 2.30 GHz, Linux
 
 | kernel | mojo-lib3mf | reference | speedup | reference implementation |
 | --- | ---: | ---: | ---: | --- |
-| transform 1M vertices | 3.691 ms | 19.661 ms | 5.33x | NumPy port of `fnMATRIX3_apply` |
-| normals 250k triangles | 2.671 ms | 43.473 ms | 16.28x | NumPy port of `fnVEC3_calcTriangleNormal` |
-| lengths 1M beams | 7.322 ms | 96.349 ms | 13.16x | NumPy port of `BeamLattice1702_Beams` |
-| manifold 20k triangles | 2.978 ms | 18.078 ms | 6.07x | lib3mf 2.5.0 |
+| transform 1M vertices | 3.817 ms | 21.619 ms | 5.66x | NumPy port of `fnMATRIX3_apply` |
+| transform kernel 4M vertices | 10.615 ms | 15.648 ms | 1.47x | serial Mojo kernel |
+| normals 250k triangles | 2.794 ms | 59.910 ms | 21.44x | NumPy port of `fnVEC3_calcTriangleNormal` |
+| lengths 1M beams | 5.146 ms | 66.455 ms | 12.91x | NumPy port of `BeamLattice1702_Beams` |
+| manifold 20k triangles | 2.835 ms | 16.129 ms | 5.69x | lib3mf 2.5.0 |
 
 Times are best of four runs, except manifold checking which is best of three.
 Input and reference setup is outside each timed call; public operations that
-return arrays allocate those results inside the timing. These are CPU and
-workload-specific results; rerun the locked benchmark task on the target
-machine rather than treating the ratios as universal.
+return arrays allocate those results inside the timing. The explicitly labeled
+4M kernel row uses the same preallocated buffers for both paths to isolate the
+parallel crossover. These are CPU and workload-specific results; rerun the
+locked benchmark task on the target machine rather than treating the ratios as
+universal.
 
 No GPU path is provided. The bulk numeric kernels move substantially more than
 one byte per two floating-point operations, while manifold checking is an

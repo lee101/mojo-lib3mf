@@ -18,6 +18,7 @@ F = ctypes.c_double
 
 _SIGNATURES = {
     "m3mf_transform_vertices_f32": ([I, I, I, I], None),
+    "m3mf_transform_vertices_f32_serial": ([I, I, I, I], None),
     "m3mf_matrix_multiply_f32": ([I, I, I], None),
     "m3mf_matrix_is_identity_f32": ([I], I),
     "m3mf_matrix_is_planar_f32": ([I], I),

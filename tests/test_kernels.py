@@ -61,6 +61,30 @@ def test_transform_vertices_matches_upstream_matrix_apply_reference():
     np.testing.assert_array_equal(actual, expected)
 
 
+@pytest.mark.parametrize("count", [1, 3, 4, 5, 11])
+def test_transform_vertices_small_remainders(count):
+    rng = np.random.default_rng(count)
+    vertices = rng.normal(size=(count, 3)).astype(np.float32)
+    matrix = np.array(
+        [[1.2, 0.1, 0.2, 4], [0.3, 0.9, 0.1, 5], [0.1, 0.2, 1.1, 6], [0, 0, 0, 1]],
+        np.float32,
+    )
+    expected = vertices @ matrix[:3, :3].T + matrix[:3, 3]
+    actual = m3.Mesh(vertices, []).transformed(matrix).vertices
+    np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_transform_vertices_parallel_threshold():
+    count = 4_000_000
+    vertices = np.arange(count * 3, dtype=np.float32).reshape(count, 3) / 17
+    matrix = np.array(
+        [[1, 0, 0, 2], [0, 1, 0, 3], [0, 0, 1, -4], [0, 0, 0, 1]],
+        np.float32,
+    )
+    actual = m3.Mesh(vertices, []).transformed(matrix).vertices
+    np.testing.assert_array_equal(actual, vertices + matrix[:3, 3])
+
+
 def test_matrix_multiply_and_3mf_wire_order():
     first = np.array(
         [[1, 2, 0, 3], [0, 1, 4, 5], [2, 0, 1, 7], [0, 0, 0, 1]],

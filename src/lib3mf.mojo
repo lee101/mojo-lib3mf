@@ -1,5 +1,6 @@
 """Compute kernels ported from lib3mf's mesh and fixed-size math code."""
 
+from max.algorithm import parallelize
 from std.math import sqrt
 from std.memory import stack_allocation
 
@@ -7,6 +8,8 @@ comptime F32Ptr = UnsafePointer[Float32, AnyOrigin[mut=True]]
 comptime F64Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime I32Ptr = UnsafePointer[Int32, AnyOrigin[mut=True]]
 comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
+comptime TRANSFORM_PARALLEL_THRESHOLD = 4_000_000
+comptime TRANSFORM_TASKS = 8
 
 
 def f32p(addr: Int) -> F32Ptr:
@@ -25,15 +28,15 @@ def i64p(addr: Int) -> I64Ptr:
     return I64Ptr(unsafe_from_address=addr)
 
 
-# lib3mf: Source/Common/Math/NMR_Matrix.cpp fnMATRIX3_apply
-@export("m3mf_transform_vertices_f32")
-def transform_vertices_f32(
-    vertices_addr: Int, matrix_addr: Int, result_addr: Int, count: Int
-) abi("C"):
-    var vertices = f32p(vertices_addr)
-    var matrix = f32p(matrix_addr)
-    var result = f32p(result_addr)
-    for i in range(count):
+@always_inline
+def transform_vertices_range(
+    vertices: F32Ptr,
+    matrix: F32Ptr,
+    result: F32Ptr,
+    start: Int,
+    end: Int,
+):
+    for i in range(start, end):
         var x = vertices[3 * i]
         var y = vertices[3 * i + 1]
         var z = vertices[3 * i + 2]
@@ -46,6 +49,41 @@ def transform_vertices_f32(
         result[3 * i + 2] = (
             matrix[8] * x + matrix[9] * y + matrix[10] * z + matrix[11]
         )
+
+
+# lib3mf: Source/Common/Math/NMR_Matrix.cpp fnMATRIX3_apply
+@export("m3mf_transform_vertices_f32")
+def transform_vertices_f32(
+    vertices_addr: Int, matrix_addr: Int, result_addr: Int, count: Int
+) abi("C"):
+    var vertices = f32p(vertices_addr)
+    var matrix = f32p(matrix_addr)
+    var result = f32p(result_addr)
+    if count < TRANSFORM_PARALLEL_THRESHOLD:
+        transform_vertices_range(vertices, matrix, result, 0, count)
+        return
+
+    @parameter
+    def work(task: Int):
+        var start = count * task // TRANSFORM_TASKS
+        transform_vertices_range(
+            vertices,
+            matrix,
+            result,
+            start,
+            count * (task + 1) // TRANSFORM_TASKS,
+        )
+
+    parallelize[work](TRANSFORM_TASKS, TRANSFORM_TASKS)
+
+
+@export("m3mf_transform_vertices_f32_serial")
+def transform_vertices_f32_serial(
+    vertices_addr: Int, matrix_addr: Int, result_addr: Int, count: Int
+) abi("C"):
+    transform_vertices_range(
+        f32p(vertices_addr), f32p(matrix_addr), f32p(result_addr), 0, count
+    )
 
 
 # lib3mf: Source/Common/Math/NMR_Matrix.cpp fnMATRIX3_multiply
