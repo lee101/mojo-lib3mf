@@ -1,6 +1,5 @@
 """Compute kernels ported from lib3mf's mesh and fixed-size math code."""
 
-from max.algorithm import parallelize
 from std.math import sqrt
 from std.memory import stack_allocation
 
@@ -8,7 +7,6 @@ comptime F32Ptr = UnsafePointer[Float32, AnyOrigin[mut=True]]
 comptime F64Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime I32Ptr = UnsafePointer[Int32, AnyOrigin[mut=True]]
 comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
-comptime TRANSFORM_PARALLEL_THRESHOLD = 4_000_000
 comptime TRANSFORM_TASKS = 8
 
 
@@ -59,22 +57,16 @@ def transform_vertices_f32(
     var vertices = f32p(vertices_addr)
     var matrix = f32p(matrix_addr)
     var result = f32p(result_addr)
-    if count < TRANSFORM_PARALLEL_THRESHOLD:
-        transform_vertices_range(vertices, matrix, result, 0, count)
-        return
-
-    @parameter
-    def work(task: Int):
-        var start = count * task // TRANSFORM_TASKS
+    # 12 flops per 24 bytes touched is well under two flops per byte, so the
+    # vertex sweep is bandwidth bound and stays on one core.
+    for task in range(TRANSFORM_TASKS):
         transform_vertices_range(
             vertices,
             matrix,
             result,
-            start,
+            count * task // TRANSFORM_TASKS,
             count * (task + 1) // TRANSFORM_TASKS,
         )
-
-    parallelize[work](TRANSFORM_TASKS, TRANSFORM_TASKS)
 
 
 @export("m3mf_transform_vertices_f32_serial")
