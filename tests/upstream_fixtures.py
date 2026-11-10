@@ -7,12 +7,16 @@ expose lib3mf's internal fixed-size math (``fnMATRIX3_multiply``,
 ``fnVEC3_calcTriangleNormal``), ``CMesh::checkSanity``, the oriented-manifold
 routine, or the beam-length computation. For those kernels the reference is the
 upstream source itself: the excerpts below are copied verbatim from
-``github.com/3MFConsortium/lib3mf`` at tag ``v2.5.0``, so every assertion can
-cite executable upstream behaviour instead of the port's own expectations.
+``github.com/3MFConsortium/lib3mf`` at tag ``v2.5.0``, so an assertion added over
+them would cite upstream behaviour instead of the port's own expectations.
 
-``test_upstream_fixture.py`` cross-checks each excerpt against
-``raw.githubusercontent.com`` and executes the arithmetic ones through
-:func:`python_transcription`.
+``test_upstream_fixture.py`` was meant to cross-check each excerpt against
+``raw.githubusercontent.com`` and execute the arithmetic ones through
+:func:`python_transcription`. That file does not exist and no test imports this
+module, so nothing here is currently asserted; the live parity coverage is
+``tests/test_kernels.py`` (NumPy transcriptions checked against the installed
+binding where it exposes the operation) and ``tests/test_io.py`` (both read
+directions against ``lib3mf``). See ``bench/verify.md``.
 """
 
 from __future__ import annotations

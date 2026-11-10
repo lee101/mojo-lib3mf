@@ -144,28 +144,33 @@ radii, cap modes, balls, and manifold results are compared against that binding.
 The binding does not expose lib3mf's internal bulk matrix, normal, or beam-length
 functions; those kernels use NumPy references transcribed from the cited
 upstream source functions, plus exact epsilon boundary and degenerate-input
-tests.
+tests. There is no test today that fetches or executes the upstream C++ excerpts
+that `tests/upstream_fixtures.py` carries, so they are documentation of the
+intended reference, not an executed oracle.
 
 The suite covers empty meshes, a single triangle, duplicate positions,
 zero-area faces, repeated face indices, out-of-range indices, non-manifold
-edges, unreferenced vertices, self-edge beams, and invalid balls.
+edges, unreferenced vertices, self-edge beams, and invalid balls. It runs 53
+tests in about 9 s on this host, none skipped.
 
 ## Benchmarks
 
 Measured with `pixi run bench` on an Intel Xeon E5-2697 v4 at 2.30 GHz (2 x 18
 cores, 72 logical), Linux 6.8.0-147-generic, while the shared host carried a load
-average of 15-19:
+average of 30-42. The table is the minimum over seven `pixi run bench` runs on
+unchanged code; see `bench/verify.md` for every raw run, including runs where
+co-tenant load inflated one side by up to 2x:
 
 | kernel | mojo-lib3mf | reference | speedup | reference implementation |
 | --- | ---: | ---: | ---: | --- |
-| transform 1M vertices | 3.511 ms | 13.508 ms | 3.85x | NumPy port of `fnMATRIX3_apply` |
-| transform kernel 4M vertices | 10.622 ms | 16.287 ms | 1.53x | serial Mojo kernel |
-| normals 250k triangles | 2.443 ms | 42.230 ms | 17.29x | NumPy port of `fnVEC3_calcTriangleNormal` |
-| lengths 1M beams | 5.085 ms | 67.814 ms | 13.34x | NumPy port of `BeamLattice1702_Beams` |
-| manifold 20k triangles | 2.737 ms | 15.839 ms | 5.79x | lib3mf 2.5.0 |
+| transform 1M vertices | 3.284 ms | 12.223 ms | 3.72x | NumPy port of `fnMATRIX3_apply` |
+| transform kernel 4M vertices | 9.549 ms | 15.006 ms | 1.57x | serial Mojo kernel |
+| normals 250k triangles | 2.212 ms | 40.757 ms | 18.43x | NumPy port of `fnVEC3_calcTriangleNormal` |
+| lengths 1M beams | 4.506 ms | 63.954 ms | 14.19x | NumPy port of `BeamLattice1702_Beams` |
+| manifold 20k triangles | 2.660 ms | 15.369 ms | 5.78x | lib3mf 2.5.0 |
 
-Times are best of four runs, except manifold checking which is best of three.
-Input and reference setup is outside each timed call; public operations that
+Each run is itself best of four calls, except manifold checking which is best of
+three. Input and reference setup is outside each timed call; public operations that
 return arrays allocate those results inside the timing. The explicitly labeled
 4M kernel row uses the same preallocated buffers for both paths to isolate the
 parallel crossover. These are CPU and workload-specific results; rerun the
@@ -190,96 +195,100 @@ same two loops next to a `max.algorithm` variant, and sweeps size x worker count
 best-of-15 per cell. Rerun it with `pixi run python bench/parallel_probe.py
 --workers 1,2,4,8`.
 
-**Transform, crossover** (best-of-25, speedup over the serial kernel). Repeat
-sweeps drift by 5-10% in either direction because the host is shared; the shape
-is what matters:
+**Transform, crossover** (best-of-15 per cell in each of three sweeps, speedup
+over the serial kernel; the table shows the observed range across those sweeps).
+The host is shared and sweeps drift by up to 20% either way, so the range is what
+reproduces, not any single cell:
 
 | vertices | serial | 2 workers | 4 workers | 8 workers |
 | ---: | ---: | ---: | ---: | ---: |
-| 1,500,000 | 5.47 ms | 0.65x | 0.82x | 0.94x |
-| 2,000,000 | 7.16 ms | 0.72x | 0.99x | 1.13x |
-| 2,500,000 | 10.13 ms | 0.89x | 1.22x | 1.33x |
-| 3,500,000 | 12.82 ms | 1.05x | 1.38x | 1.53x |
-| 4,000,000 | 14.32 ms | 1.03x | 1.39x | 1.61x |
+| 1,500,000 | 5.16-5.92 ms | 0.67-0.71x | 0.76-0.84x | 0.79-0.90x |
+| 2,000,000 | 7.04-7.66 ms | 0.73-0.79x | 0.88-0.95x | 0.96-1.07x |
+| 2,500,000 | 8.97 ms (one sweep) | 0.81x | 0.98x | 1.12x |
+| 3,500,000 | 12.78 ms (one sweep) | 1.00x | 1.26x | 1.24x |
+| 4,000,000 | 13.99-14.95 ms | 0.95-1.13x | 1.43-1.54x | 1.40-1.49x |
 
-The parallel path loses below ~2M vertices (0.82-1.05x at 1-1.5M, and at 100k-1M
-it is 0.29-0.64x), turns over between 2M and 3M, and is consistently ahead from
-2.5M up. The gate is **4,000,000 vertices**, about 1.3x above the crossover, which
-is also the size `pixi run bench` already exercises. Beam lengths cross later,
-about 2M beams:
+The parallel path loses below ~2M vertices (0.67-0.90x at 1-1.5M), turns over
+between 2M and 3M, and is ahead from ~3M up (1.24-1.61x on 4-8 workers). At
+100k-1M vertices on 4 or 8 workers it is 0.04-0.67x of serial: the pool adds about
+4.1-5.3 ms per call at these sizes, so 100k vertices runs about 25x slower on the
+parallel path. The gate is **4,000,000 vertices**, which keeps those sizes on the
+serial path and is also the size `pixi run bench` exercises. Beam lengths cross
+later, about 2M beams:
 
 | beams | serial | 2 workers | 4 workers | 8 workers |
 | ---: | ---: | ---: | ---: | ---: |
-| 1,000,000 | 4.76 ms | 0.69x | 0.81x | 0.92x |
-| 1,500,000 | 6.72 ms | 0.80x | 0.98x | 1.00x |
-| 2,000,000 | 8.68 ms | 0.90x | 1.09x | 1.20x |
-| 3,000,000 | 12.66 ms | 0.97x | 1.28x | 1.22x |
-| 4,000,000 | 17.53 ms | 1.07x | 1.53x | 2.06x |
+| 1,000,000 | 4.28-4.65 ms | 0.57-0.60x | 0.56-0.74x | 0.59-0.78x |
+| 1,500,000 | 6.45-6.58 ms | 0.66-0.76x | 0.73-0.92x | 0.79-0.97x |
+| 2,000,000 | 8.95-9.21 ms | 0.86-0.89x | 1.02-1.06x | 0.98-1.15x |
+| 3,000,000 | 13.10-14.90 ms | 1.08-1.19x | 1.37-1.45x | 1.38-1.53x |
+| 4,000,000 | 18.50-19.16 ms | 1.19x | 1.68-1.73x | 1.72-1.86x |
 
-The 2M row sits inside the noise (separate repeats gave 0.81-1.09x), so the gate
-is **3,000,000 beams**, where it measured >=1.28x. The bench's 1M-beam row stays
-on the serial path and is expected to be unchanged.
+The 2M row sits inside the noise (repeats gave 0.98-1.15x on 8 workers, 1.02-1.06x
+on 4), so the gate is **3,000,000 beams**, where 4 workers measured 1.37-1.45x and
+8 workers 1.38-1.53x. The bench's 1M-beam row stays on the serial path, where the
+probe measured 0.56-0.78x for the parallel path it does not use.
 
 **Worker cap: 4.** Four threads are used for both kernels. Transform scales
-2.59x at 16M vertices on 4 workers and 2.85x on 8, a flattening gain for twice
-the contention; beam lengths is the erratic one (8 workers gave 2.06x at 4M in
-one repeat and 1.80x at 3M in the next). The cap is not raised.
+2.28-2.46x at 16M vertices on 4 workers and 2.50-2.88x on 8, a flattening gain for
+twice the contention; beam lengths is the erratic one (8 workers gave 1.72-1.86x at
+4M and 1.38-1.53x at 3M across sweeps). The cap is not raised.
 
-**Before and after**, `pixi run bench`, same host and harness:
-
-| kernel | before this phase | after | note |
-| --- | ---: | ---: | --- |
-| transform 1M vertices | 3.601 ms | 3.511 ms | below the gate, still serial (noise) |
-| transform kernel 4M vertices | 14.625 ms / 14.982 ms serial | 10.622 ms / 16.287 ms serial | 1.02x -> 1.53x |
-| lengths 1M beams | 5.032 ms | 5.085 ms | below the gate, still serial (noise) |
-
-"Before" is the shipped code, whose `m3mf_transform_vertices_f32` split the
+**Before and after this phase** was measured in the phase that introduced the pool;
+those runs are not from this verification session and are therefore no longer
+quoted here. What the table above shows is the current split: the gated kernel at
+4M vertices measured 9.55-23.07 ms against 15.01-22.49 ms for the serial kernel
+over seven runs, a best case of 1.96x and a worst case of 0.65x when a co-tenant
+stole the workers (6 of the 7 runs were 1.43x or better). "Before" that phase, `m3mf_transform_vertices_f32` split the
 vertices into eight *serial* chunks in one call, labelled parallel but measured
 at 0.86-1.05x of the serial kernel in `bench/analysis.md`. That chunking is
 replaced by the real pool, not kept alongside it.
 
 Gain flattens on this host because both kernels are memory-bound (24 MB per 1M
-transform, measured at ~8 GB/s single-threaded) and the host is shared; two
-sockets add a NUMA penalty on the split buffers. `m3mf_transform_vertices_f32_serial`
+transform; a NumPy `add` over two 32 MB arrays measured 8.72 GB/s single-threaded
+this session, and the 1M-vertex transform moves 24 MB in ~3.3 ms, ~7.3 GB/s) and
+the host is shared; two sockets add a NUMA penalty on the split buffers. `m3mf_transform_vertices_f32_serial`
 and the `TRANSFORM_PARALLEL_MIN`/`BEAM_LENGTHS_PARALLEL_MIN`/`PARALLEL_WORKERS`
 constants in `src/lib3mf.mojo` are where to change the gates.
 
-One caveat from the sweep above: with the pool warmed, a 3M-beam call measured
-0.67x of serial in one repeat, so the beam gate can still lose when the host is
-contended. If that pattern repeats on the target machine, raise
-`BEAM_LENGTHS_PARALLEL_MIN` or drop that gate; the transform at 4M stayed
->=1.35x in every repeat.
+The phase that set the beam gate also recorded one 3M-beam call at 0.67x of
+serial, which this session did not reproduce: three sweeps measured 1.37-1.45x on
+4 workers and 1.38-1.53x on 8 at that size. The gate is therefore unchanged. The
+sweeps do show that the beam kernel loses below 2M beams (0.56-0.97x across 1-1.5M
+and 1-8 workers) and only clears 1.0x at 2-3M with 4-8 workers (0.98-1.15x at 2M,
+1.08-1.53x at 3M), so a target machine with a slower pool can still lose here; if
+that happens, raise `BEAM_LENGTHS_PARALLEL_MIN` or drop that gate.
+The transform at 4M stayed at 1.43-1.54x on 4 workers in every sweep of this
+session, but fell to 0.65x of serial in one of seven `pixi run bench` runs under
+heavy co-tenant load, so it is not immune either.
 
 ## SIMD and fusion evaluation
 
 `bench/analysis.md` ranked the hot contiguous loops and concluded manual SIMD
 was not justified because the kernels sit at the machine's memory ceiling. That
-claim was tested directly on this host (`simd_width_of[DType.float32]()` is 8;
-the CPU has AVX2/FMA and no AVX-512). Every candidate was compiled as an extra
-`@export` next to the existing kernels and checked against them on the same
-buffers before any timing:
+claim was tested in the phase that produced this section (`simd_width_of[DType.float32]()`
+is 8; the CPU has AVX2/FMA and no AVX-512). Its candidates were compiled as extra
+`@export` entries next to the existing kernels and checked against them on the
+same buffers before any timing. Those experiment kernels are not in this
+commit, so the results below are that phase's record, not measurements from this
+session:
 
 | kernel | candidate | result |
 | --- | --- | --- |
 | `transform_vertices_f32_serial` | one 8-, 16- or 64-lane contiguous vector per iteration over the flattened `(n, 3)` buffer (`v * plane + bias`) | wrong values in rows the vector pass wrote, so not timed; the shipped scalar loop already uses about one vector register per vertex, so there is no widening to win |
-| `triangle_normals_f32` | not attempted | per-face gather through the Int32 index array; the analysis measured it as gather-latency bound (3 MB index + 9 MB gathered vertices per 250k faces) |
+| `triangle_normals_f32` | not attempted | per-face gather through the Int32 index array; the analysis treats it as gather-latency bound (3 MB index + 9 MB gathered vertices per 250k faces) |
 | `beam_lengths_f32` | flags already fused into the length pass; a widened variant was abandoned | its strided index gather cannot be widened, and the length is `sqrt(Float32)` promoted to `Float64`, so the probe computed values in a different type rather than like-for-like |
 | `transform_vertices_f32_serial` | software pipelining, 2 and 4 vertices in flight, identical per-vertex expressions (bit-identical results, asserted at 0, 1, 2, 3, 5, 6, 7, 8, 9, 11, 20, 21, 1001 and 4099 vertices) | slower: pipe-2 0.89-0.99x and pipe-4 0.86-0.90x of serial in 5 of 6 runs (1M and 4M vertices, best of 20/8) |
 
-`pixi run bench` before and after the evaluation, four runs each, with `src/`
-checked out and rebuilt from the same commit (the host was under unrelated
-load, so these are the same code measured twice):
-
-| kernel | before (4 runs) | after (4 runs) |
-| --- | ---: | ---: |
-| transform 1M vertices | 3.525, 3.554, 3.804, 4.453 ms | 3.666, 4.383, 3.578, 3.626 ms |
-| transform kernel 4M vertices | 16.139, 13.793, 15.149, 15.237 ms | 16.061, 16.291, 16.040, 15.367 ms |
-| normals 250k triangles | 2.441, 2.485, 2.465, 2.476 ms | 2.396, 2.538, 2.380, 2.882 ms |
-| lengths 1M beams | 5.104, 5.422, 5.140, 5.100 ms | 5.092, 7.097, 5.117, 5.219 ms |
-| manifold 20k triangles | 2.740, 2.724, 2.718, 2.734 ms | 2.579, 2.816, 2.851, 2.843 ms |
-
-None of these is retained; the kernels, their results and the benchmark numbers
-are unchanged. The pipelined variant was rejected on measurement, the
+The before/after `pixi run bench` table that this section originally carried was
+measured in that phase, and its "before" column came from a tree that is not
+checked out in this commit, so it is not reproduced here. What this session
+measured is seven runs of the unchanged code; the ranges are in the main
+benchmark table above (`transform 1M` 3.28-8.24 ms, `4M` 9.55-23.07 ms parallel
+over 15.01-22.49 ms serial, `normals` 2.21-2.66 ms, `lengths` 4.51-7.12 ms,
+`manifold` 2.66-3.09 ms). None of the candidates is retained; the kernels, their
+results and the benchmark numbers are unchanged. The pipelined variant was
+rejected on measurement, the
 `transform` vector variants on correctness, and the remaining loops were not
 candidates because their memory access is strided. Length-coverage tests for a
 vector tail (`0, 1, W-1, W, W+1`, large odd) are only meaningful with a retained

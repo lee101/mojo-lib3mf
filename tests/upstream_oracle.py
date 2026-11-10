@@ -1,9 +1,11 @@
 """Helpers that ask the installed upstream ``lib3mf`` 2.5.0 binding directly.
 
-Every helper here is a thin wrapper around the real upstream library, so a test
-that uses one compares the port against lib3mf itself rather than against a
-second Python implementation of the same idea. Where upstream's public API does
-not expose a kernel, the test cites ``tests/upstream_fixtures.py`` instead.
+	Every helper here is a thin wrapper around the real upstream library, so a test
+	that uses one compares the port against lib3mf itself rather than against a
+	second Python implementation of the same idea. No test imports this module yet
+	(see ``bench/verify.md``); ``tests/test_kernels.py`` and ``tests/test_io.py``
+	call the binding directly. Where upstream's public API does
+	not expose a kernel, the test cites ``tests/upstream_fixtures.py`` instead.
 """
 
 from __future__ import annotations
