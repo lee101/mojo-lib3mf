@@ -1,13 +1,25 @@
 """Compute kernels ported from lib3mf's mesh and fixed-size math code."""
 
+from max.algorithm import parallelize
 from std.math import sqrt
 from std.memory import stack_allocation
 
 comptime F32Ptr = UnsafePointer[Float32, AnyOrigin[mut=True]]
+comptime F32PtrIn = UnsafePointer[Float32, AnyOrigin[mut=False]]
 comptime F64Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
 comptime I32Ptr = UnsafePointer[Int32, AnyOrigin[mut=True]]
 comptime I64Ptr = UnsafePointer[Int64, AnyOrigin[mut=True]]
-comptime TRANSFORM_TASKS = 8
+# Parallel gates, measured on this host (see README, "Parallelism"):
+# - transform: a real max.algorithm pool pays only from ~2M vertices up (speedup
+#   0.82-1.05x below, 1.06-1.53x at 2-3.5M, ~1.5x+ at 4M and above). 4M is a ~1.3x
+#   margin over the crossover and is the size the bench exercises.
+# - beam lengths: crossover is ~2M beams but the gain is small and noisy there
+#   (0.91-1.25x across repeats); 3M, where it was >=1.28x, is the gate.
+# - workers: 4. On 8 the transform flattens (4w 1.52-2.53x, 8w 1.47-2.98x) while
+#   beam lengths gets more erratic; the host is shared, so 4 stays the cap.
+comptime TRANSFORM_PARALLEL_MIN = 4_000_000
+comptime BEAM_LENGTHS_PARALLEL_MIN = 3_000_000
+comptime PARALLEL_WORKERS = 4
 
 
 def f32p(addr: Int) -> F32Ptr:
@@ -29,7 +41,7 @@ def i64p(addr: Int) -> I64Ptr:
 @always_inline
 def transform_vertices_range(
     vertices: F32Ptr,
-    matrix: F32Ptr,
+    matrix: F32PtrIn,
     result: F32Ptr,
     start: Int,
     end: Int,
@@ -57,16 +69,21 @@ def transform_vertices_f32(
     var vertices = f32p(vertices_addr)
     var matrix = f32p(matrix_addr)
     var result = f32p(result_addr)
-    # 12 flops per 24 bytes touched is well under two flops per byte, so the
-    # vertex sweep is bandwidth bound and stays on one core.
-    for task in range(TRANSFORM_TASKS):
+    # Zero-padded matrix rows (m[12..15]) are ignored, so a read-only F32Ptr
+    # capture is enough for the typed worker.
+    var matrix_in = F32PtrIn(unsafe_from_address=matrix_addr)
+    if count < TRANSFORM_PARALLEL_MIN:
+        transform_vertices_range(vertices, matrix_in, result, 0, count)
+        return
+    def work(item: Int) {imm}:
         transform_vertices_range(
             vertices,
-            matrix,
+            matrix_in,
             result,
-            count * task // TRANSFORM_TASKS,
-            count * (task + 1) // TRANSFORM_TASKS,
+            count * item // PARALLEL_WORKERS,
+            count * (item + 1) // PARALLEL_WORKERS,
         )
+    parallelize(work, PARALLEL_WORKERS, PARALLEL_WORKERS)
 
 
 @export("m3mf_transform_vertices_f32_serial")
@@ -295,6 +312,27 @@ def manifold_oriented(
 
 
 # lib3mf: Source/Model/Reader/BeamLattice1702/NMR_ModelReaderNode_BeamLattice1702_Beams.cpp OnNSChildElement
+@always_inline
+def beam_lengths_range(
+    vertices: F32Ptr,
+    beams: I32Ptr,
+    lengths: F64Ptr,
+    too_short: I32Ptr,
+    min_length: Float64,
+    start: Int,
+    end: Int,
+):
+    for i in range(start, end):
+        var a = Int(beams[2 * i])
+        var b = Int(beams[2 * i + 1])
+        var dx = vertices[3 * a] - vertices[3 * b]
+        var dy = vertices[3 * a + 1] - vertices[3 * b + 1]
+        var dz = vertices[3 * a + 2] - vertices[3 * b + 2]
+        var length = sqrt(dx * dx + dy * dy + dz * dz)
+        lengths[i] = Float64(length)
+        too_short[i] = 1 if Float64(length) < min_length else 0
+
+
 @export("m3mf_beam_lengths_f32")
 def beam_lengths_f32(
     vertices_addr: Int,
@@ -308,12 +346,19 @@ def beam_lengths_f32(
     var beams = i32p(beams_addr)
     var lengths = f64p(lengths_addr)
     var too_short = i32p(too_short_addr)
-    for i in range(beam_count):
-        var a = Int(beams[2 * i])
-        var b = Int(beams[2 * i + 1])
-        var dx = vertices[3 * a] - vertices[3 * b]
-        var dy = vertices[3 * a + 1] - vertices[3 * b + 1]
-        var dz = vertices[3 * a + 2] - vertices[3 * b + 2]
-        var length = sqrt(dx * dx + dy * dy + dz * dz)
-        lengths[i] = Float64(length)
-        too_short[i] = 1 if Float64(length) < min_length else 0
+    if beam_count < BEAM_LENGTHS_PARALLEL_MIN:
+        beam_lengths_range(
+            vertices, beams, lengths, too_short, min_length, 0, beam_count
+        )
+        return
+    def work(item: Int) {imm}:
+        beam_lengths_range(
+            vertices,
+            beams,
+            lengths,
+            too_short,
+            min_length,
+            beam_count * item // PARALLEL_WORKERS,
+            beam_count * (item + 1) // PARALLEL_WORKERS,
+        )
+    parallelize(work, PARALLEL_WORKERS, PARALLEL_WORKERS)

@@ -121,11 +121,14 @@ order, the `1e-10` normal cutoff, `1e-7` planar and identity choices, and the
 `CModelMeshObject::isManifoldAndOriented`: every undirected edge must occur once
 in each direction.
 
-Vertex transforms use the compiler-vectorized serial loop below 4 million
-vertices. At and above that measured crossover they split into eight independent,
-balanced CPU tasks; smaller inputs avoid thread-pool launch overhead. Explicit
-strided SIMD gathers were benchmarked but not retained because they were slower
-than Mojo's vectorization of the contiguous AoS loop on this machine.
+Vertex transforms and beam lengths use the compiler-vectorized serial loop below
+a measured size threshold; at and above it they split across a real
+`max.algorithm.parallelize` worker pool, so smaller inputs avoid pool overhead.
+The gates are 4,000,000 vertices and 3,000,000 beams with 4 workers each; the
+measurements behind them, and the sizes where the gain flattens, are in
+[Parallelism](#parallelism). Explicit strided SIMD gathers were benchmarked but
+not retained because they were slower than Mojo's vectorization of the
+contiguous AoS loop on this machine.
 
 Hand-written SIMD was evaluated again and again not retained; see
 [SIMD and fusion evaluation](#simd-and-fusion-evaluation). The contiguous
@@ -149,16 +152,17 @@ edges, unreferenced vertices, self-edge beams, and invalid balls.
 
 ## Benchmarks
 
-Measured with `pixi run bench` on an Intel Xeon E5-2697 v4 at 2.30 GHz, Linux
-6.8.0-136-generic:
+Measured with `pixi run bench` on an Intel Xeon E5-2697 v4 at 2.30 GHz (2 x 18
+cores, 72 logical), Linux 6.8.0-147-generic, while the shared host carried a load
+average of 15-19:
 
 | kernel | mojo-lib3mf | reference | speedup | reference implementation |
 | --- | ---: | ---: | ---: | --- |
-| transform 1M vertices | 3.817 ms | 21.619 ms | 5.66x | NumPy port of `fnMATRIX3_apply` |
-| transform kernel 4M vertices | 10.615 ms | 15.648 ms | 1.47x | serial Mojo kernel |
-| normals 250k triangles | 2.794 ms | 59.910 ms | 21.44x | NumPy port of `fnVEC3_calcTriangleNormal` |
-| lengths 1M beams | 5.146 ms | 66.455 ms | 12.91x | NumPy port of `BeamLattice1702_Beams` |
-| manifold 20k triangles | 2.835 ms | 16.129 ms | 5.69x | lib3mf 2.5.0 |
+| transform 1M vertices | 3.511 ms | 13.508 ms | 3.85x | NumPy port of `fnMATRIX3_apply` |
+| transform kernel 4M vertices | 10.622 ms | 16.287 ms | 1.53x | serial Mojo kernel |
+| normals 250k triangles | 2.443 ms | 42.230 ms | 17.29x | NumPy port of `fnVEC3_calcTriangleNormal` |
+| lengths 1M beams | 5.085 ms | 67.814 ms | 13.34x | NumPy port of `BeamLattice1702_Beams` |
+| manifold 20k triangles | 2.737 ms | 15.839 ms | 5.79x | lib3mf 2.5.0 |
 
 Times are best of four runs, except manifold checking which is best of three.
 Input and reference setup is outside each timed call; public operations that
@@ -172,6 +176,79 @@ No GPU path is provided. The bulk numeric kernels move substantially more than
 one byte per two floating-point operations, while manifold checking is an
 integer sort with irregular memory access. All are below the arithmetic
 intensity needed to repay device transfer and launch overhead.
+
+## Parallelism
+
+Two kernels are size-gated onto `max.algorithm.parallelize` with an explicit
+worker count (`std.algorithm`/`std.threading` forms do not compile on this
+toolchain). Everything else stays serial, and sizes below the gate never touch
+the pool.
+
+`bench/parallel_probe.py` builds `bench/parallel_probe.mojo`, which carries the
+same two loops next to a `max.algorithm` variant, and sweeps size x worker count
+(1, 2, 4, 8), checking every parallel result against the serial output. It runs
+best-of-15 per cell. Rerun it with `pixi run python bench/parallel_probe.py
+--workers 1,2,4,8`.
+
+**Transform, crossover** (best-of-25, speedup over the serial kernel). Repeat
+sweeps drift by 5-10% in either direction because the host is shared; the shape
+is what matters:
+
+| vertices | serial | 2 workers | 4 workers | 8 workers |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,500,000 | 5.47 ms | 0.65x | 0.82x | 0.94x |
+| 2,000,000 | 7.16 ms | 0.72x | 0.99x | 1.13x |
+| 2,500,000 | 10.13 ms | 0.89x | 1.22x | 1.33x |
+| 3,500,000 | 12.82 ms | 1.05x | 1.38x | 1.53x |
+| 4,000,000 | 14.32 ms | 1.03x | 1.39x | 1.61x |
+
+The parallel path loses below ~2M vertices (0.82-1.05x at 1-1.5M, and at 100k-1M
+it is 0.29-0.64x), turns over between 2M and 3M, and is consistently ahead from
+2.5M up. The gate is **4,000,000 vertices**, about 1.3x above the crossover, which
+is also the size `pixi run bench` already exercises. Beam lengths cross later,
+about 2M beams:
+
+| beams | serial | 2 workers | 4 workers | 8 workers |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,000,000 | 4.76 ms | 0.69x | 0.81x | 0.92x |
+| 1,500,000 | 6.72 ms | 0.80x | 0.98x | 1.00x |
+| 2,000,000 | 8.68 ms | 0.90x | 1.09x | 1.20x |
+| 3,000,000 | 12.66 ms | 0.97x | 1.28x | 1.22x |
+| 4,000,000 | 17.53 ms | 1.07x | 1.53x | 2.06x |
+
+The 2M row sits inside the noise (separate repeats gave 0.81-1.09x), so the gate
+is **3,000,000 beams**, where it measured >=1.28x. The bench's 1M-beam row stays
+on the serial path and is expected to be unchanged.
+
+**Worker cap: 4.** Four threads are used for both kernels. Transform scales
+2.59x at 16M vertices on 4 workers and 2.85x on 8, a flattening gain for twice
+the contention; beam lengths is the erratic one (8 workers gave 2.06x at 4M in
+one repeat and 1.80x at 3M in the next). The cap is not raised.
+
+**Before and after**, `pixi run bench`, same host and harness:
+
+| kernel | before this phase | after | note |
+| --- | ---: | ---: | --- |
+| transform 1M vertices | 3.601 ms | 3.511 ms | below the gate, still serial (noise) |
+| transform kernel 4M vertices | 14.625 ms / 14.982 ms serial | 10.622 ms / 16.287 ms serial | 1.02x -> 1.53x |
+| lengths 1M beams | 5.032 ms | 5.085 ms | below the gate, still serial (noise) |
+
+"Before" is the shipped code, whose `m3mf_transform_vertices_f32` split the
+vertices into eight *serial* chunks in one call, labelled parallel but measured
+at 0.86-1.05x of the serial kernel in `bench/analysis.md`. That chunking is
+replaced by the real pool, not kept alongside it.
+
+Gain flattens on this host because both kernels are memory-bound (24 MB per 1M
+transform, measured at ~8 GB/s single-threaded) and the host is shared; two
+sockets add a NUMA penalty on the split buffers. `m3mf_transform_vertices_f32_serial`
+and the `TRANSFORM_PARALLEL_MIN`/`BEAM_LENGTHS_PARALLEL_MIN`/`PARALLEL_WORKERS`
+constants in `src/lib3mf.mojo` are where to change the gates.
+
+One caveat from the sweep above: with the pool warmed, a 3M-beam call measured
+0.67x of serial in one repeat, so the beam gate can still lose when the host is
+contended. If that pattern repeats on the target machine, raise
+`BEAM_LENGTHS_PARALLEL_MIN` or drop that gate; the transform at 4M stayed
+>=1.35x in every repeat.
 
 ## SIMD and fusion evaluation
 
