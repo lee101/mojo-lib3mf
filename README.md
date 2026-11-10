@@ -127,6 +127,12 @@ balanced CPU tasks; smaller inputs avoid thread-pool launch overhead. Explicit
 strided SIMD gathers were benchmarked but not retained because they were slower
 than Mojo's vectorization of the contiguous AoS loop on this machine.
 
+Hand-written SIMD was evaluated again and again not retained; see
+[SIMD and fusion evaluation](#simd-and-fusion-evaluation). The contiguous
+transform loop compiles to a scalar loop of 3 loads, 3 `vfmadd231ss`, 3
+`vaddss` and 3 stores per vertex: one vector register's worth of work per
+vertex, with no widening pass at all.
+
 ## Correctness
 
 The tests install the official `lib3mf` 2.5.0 Python binding. Packages are
@@ -166,3 +172,39 @@ No GPU path is provided. The bulk numeric kernels move substantially more than
 one byte per two floating-point operations, while manifold checking is an
 integer sort with irregular memory access. All are below the arithmetic
 intensity needed to repay device transfer and launch overhead.
+
+## SIMD and fusion evaluation
+
+`bench/analysis.md` ranked the hot contiguous loops and concluded manual SIMD
+was not justified because the kernels sit at the machine's memory ceiling. That
+claim was tested directly on this host (`simd_width_of[DType.float32]()` is 8;
+the CPU has AVX2/FMA and no AVX-512). Every candidate was compiled as an extra
+`@export` next to the existing kernels and checked against them on the same
+buffers before any timing:
+
+| kernel | candidate | result |
+| --- | --- | --- |
+| `transform_vertices_f32_serial` | one 8-, 16- or 64-lane contiguous vector per iteration over the flattened `(n, 3)` buffer (`v * plane + bias`) | wrong values in rows the vector pass wrote, so not timed; the shipped scalar loop already uses about one vector register per vertex, so there is no widening to win |
+| `triangle_normals_f32` | not attempted | per-face gather through the Int32 index array; the analysis measured it as gather-latency bound (3 MB index + 9 MB gathered vertices per 250k faces) |
+| `beam_lengths_f32` | flags already fused into the length pass; a widened variant was abandoned | its strided index gather cannot be widened, and the length is `sqrt(Float32)` promoted to `Float64`, so the probe computed values in a different type rather than like-for-like |
+| `transform_vertices_f32_serial` | software pipelining, 2 and 4 vertices in flight, identical per-vertex expressions (bit-identical results, asserted at 0, 1, 2, 3, 5, 6, 7, 8, 9, 11, 20, 21, 1001 and 4099 vertices) | slower: pipe-2 0.89-0.99x and pipe-4 0.86-0.90x of serial in 5 of 6 runs (1M and 4M vertices, best of 20/8) |
+
+`pixi run bench` before and after the evaluation, four runs each, with `src/`
+checked out and rebuilt from the same commit (the host was under unrelated
+load, so these are the same code measured twice):
+
+| kernel | before (4 runs) | after (4 runs) |
+| --- | ---: | ---: |
+| transform 1M vertices | 3.525, 3.554, 3.804, 4.453 ms | 3.666, 4.383, 3.578, 3.626 ms |
+| transform kernel 4M vertices | 16.139, 13.793, 15.149, 15.237 ms | 16.061, 16.291, 16.040, 15.367 ms |
+| normals 250k triangles | 2.441, 2.485, 2.465, 2.476 ms | 2.396, 2.538, 2.380, 2.882 ms |
+| lengths 1M beams | 5.104, 5.422, 5.140, 5.100 ms | 5.092, 7.097, 5.117, 5.219 ms |
+| manifold 20k triangles | 2.740, 2.724, 2.718, 2.734 ms | 2.579, 2.816, 2.851, 2.843 ms |
+
+None of these is retained; the kernels, their results and the benchmark numbers
+are unchanged. The pipelined variant was rejected on measurement, the
+`transform` vector variants on correctness, and the remaining loops were not
+candidates because their memory access is strided. Length-coverage tests for a
+vector tail (`0, 1, W-1, W, W+1`, large odd) are only meaningful with a retained
+SIMD path; with none, the existing tests are the coverage. Revisit SIMD only
+with a kernel that is compute-bound rather than moving 24 MB per call.
